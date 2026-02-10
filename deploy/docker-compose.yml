@@ -1,0 +1,203 @@
+version: '3.8'
+
+# ==============================================================================
+# SENTINEL PLATFORM ORCHESTRATION
+# ==============================================================================
+# This file defines the multi-container architecture for the Sentinel Platform.
+#
+# SERVICES:
+#   1. sentinel-core: The main application gateway (FastAPI).
+#   2. sentinel-scanner: The AV logic wrapper (Python).
+#   3. clamav-service: The actual antivirus engine (ClamAV daemon).
+#   4. mongo: The metadata database.
+#   5. minio: The object storage (S3 compatible) for encrypted blobs.
+#   6. presidio-*: Microsoft's PII detection and anonymization engines.
+#
+# CONFIGURATION NOTE:
+#   The Presidio services (analyzer/anonymizer) are resource-intensive.
+#   If PII scanning is not required:
+#   1. Comment out or remove the 'presidio-analyzer' and 'presidio-anonymizer' blocks below.
+#   2. In your 'sentinel.yaml' policy file, set 'services: privacy: false'.
+# ==============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # CORE API GATEWAY
+  # ---------------------------------------------------------------------------
+  # The central entry point for all API traffic. It coordinates security checks,
+  # encryption, and storage operations.
+  sentinel-core:
+    build:
+      context: ../core
+      dockerfile: Dockerfile
+    container_name: sentinel_core
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env  # Loads secrets like MONGO_URI, SENTINEL_MASTER_KEY, etc.
+    depends_on:
+      # We use 'service_healthy' to ensure Core doesn't crash on startup
+      # by trying to connect to a Database that isn't ready yet.
+      mongo:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      sentinel-scanner:
+        condition: service_started
+    networks:
+      - sentinel_net
+    volumes:
+      # Mount the policy file read-only (ro) so the container can't modify it.
+      # This allows for hot-reloading policies without rebuilding the image.
+      - ./sentinel.yaml:/app/sentinel.yaml:ro
+
+  # ---------------------------------------------------------------------------
+  # AV SCANNER SERVICE
+  # ---------------------------------------------------------------------------
+  # A specialized microservice that bridges the gap between the Core API
+  # and the raw ClamAV/Yara engines.
+  sentinel-scanner:
+    build:
+      context: ../scanner
+      dockerfile: Dockerfile
+    container_name: sentinel_scanner
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Service Discovery: We use the docker container name 'clamav-service'
+      - CLAMAV_HOST=clamav-service 
+      - CLAMAV_PORT=3310
+    depends_on:
+      - clamav-service
+    networks:
+      - sentinel_net
+
+  # ---------------------------------------------------------------------------
+  # CLAMAV ENGINE
+  # ---------------------------------------------------------------------------
+  # The raw antivirus daemon. It requires significant RAM to hold signature DBs.
+  clamav-service:
+    image: clamav/clamav:latest
+    container_name: sentinel_clamav_engine
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          # Limit memory to prevents OOM kills on the host machine.
+          # ClamAV needs ~1.5GB to run smoothly.
+          memory: 2G
+    expose:
+      - "3310" # Internal communication only (not mapped to host)
+    networks:
+      - sentinel_net
+
+  # ---------------------------------------------------------------------------
+  # METADATA DATABASE (MongoDB)
+  # ---------------------------------------------------------------------------
+  # Persistent storage for file metadata and audit logs.
+  mongo:
+    image: mongo:latest
+    container_name: sentinel_mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    ports:
+      - "27017:27017" # Exposed for local debugging tools
+    volumes:
+      - mongo_data:/data/db # Persistence volume
+    # Healthcheck is critical for 'depends_on' in sentinel-core
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - sentinel_net
+
+  # ---------------------------------------------------------------------------
+  # DATABASE GUI (Mongo Express) - OPTIONAL
+  # ---------------------------------------------------------------------------
+  # Web-based admin interface for MongoDB.
+  # RECOMMENDATION: Remove this service in Production environments.
+  mongo-express:
+    image: mongo-express
+    container_name: sentinel_mongo_ui
+    restart: on-failure
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      ME_CONFIG_MONGODB_ADMINPASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+      ME_CONFIG_MONGODB_URL: mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@sentinel_mongo:27017/
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - sentinel_net
+
+  # ---------------------------------------------------------------------------
+  # OBJECT STORAGE (MinIO / S3)
+  # ---------------------------------------------------------------------------
+  # Object storage for the actual encrypted file blobs.
+  minio:
+    image: minio/minio
+    container_name: sentinel_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000" # API Port
+      - "9001:9001" # Console Port
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+    volumes:
+      - minio_data:/data # Persistence volume
+    networks:
+      - sentinel_net
+
+  # ---------------------------------------------------------------------------
+  # PII ANALYZER (Microsoft Presidio) - OPTIONAL
+  # ---------------------------------------------------------------------------
+  # Detects PII entities (Credit cards, SSN, etc.).
+  # To disable: Comment out this service and set 'privacy: enabled: false' in sentinel.yaml
+  presidio-analyzer:
+    image: mcr.microsoft.com/presidio-analyzer:latest
+    container_name: sentinel_presidio_analyzer
+    restart: always
+    ports:
+      - "5001:3000"
+    environment:
+      - ANALYZER_CONF_FILE=/usr/bin/presidio-analyzer/conf/default.yaml
+      - NLP_ENGINE_NAME=spacy
+      - MODELS_CONF_FILE=/usr/bin/presidio-analyzer/conf/spacy_model.yaml
+    networks:
+      - sentinel_net
+
+  # ---------------------------------------------------------------------------
+  # PII ANONYMIZER (Microsoft Presidio) - OPTIONAL
+  # ---------------------------------------------------------------------------
+  # Replaces detected entities with placeholders.
+  # To disable: Comment out this service and set 'privacy: enabled: false' in sentinel.yaml
+  presidio-anonymizer:
+    image: mcr.microsoft.com/presidio-anonymizer:latest
+    container_name: sentinel_presidio_anonymizer
+    restart: always
+    ports:
+      - "5002:3000"
+    networks:
+      - sentinel_net
+
+# ==============================================================================
+# NETWORKS & VOLUMES
+# ==============================================================================
+networks:
+  sentinel_net:
+    driver: bridge # Standard isolated docker network
+
+volumes:
+  mongo_data: # Persist DB data on host
+  minio_data: # Persist S3 files on host

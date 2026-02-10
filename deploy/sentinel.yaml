@@ -1,0 +1,76 @@
+# ==============================================================================
+# SENTINEL SECURITY POLICY CONFIGURATION
+# ==============================================================================
+# This file controls the runtime behavior of the Sentinel Core service.
+# It is mounted into the container at /app/sentinel.yaml.
+#
+# RELOADING:
+# Changes to this file require a service restart to take effect:
+# $ docker compose restart sentinel-core
+# ==============================================================================
+
+# --- SERVICE CONTROL (MASTER SWITCHES) ---
+# [PERFORMANCE CRITICAL]
+# Use these toggles to enable/disable entire security engines.
+# - If you do not need PII scrubbing, set 'privacy: false' to save significant RAM/CPU.
+# - If you are running locally without ClamAV, set 'scanner: false'.
+services:
+  scanner: true    # Set to 'false' to bypass ClamAV/Yara entirely.
+  privacy: true    # Set to 'false' to disable PII Scrubbing (allows removing Presidio containers).
+  sanitizer: true  # Set to 'false' to bypass HTML sanitization (XSS protection).
+
+# --- FILE INGESTION POLICY ---
+file_security:
+  # [HARD LIMIT]
+  # Maximum allowed file size in Megabytes.
+  # Files larger than this are rejected immediately (413 Payload Too Large).
+  max_size_mb: 50
+  
+  # [ALLOWLIST]
+  # Only these MIME types are accepted.
+  # The system checks the file's "Magic Bytes" (header signature), NOT just the extension.
+  allowed_mime_types:
+    - application/pdf
+    - application/msword
+    - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+    - image/jpeg
+    - image/png
+    - text/plain
+    - application/json
+
+# --- PII SCRUBBING POLICY ---
+# Only active if 'services.privacy' is true.
+privacy:
+  # Which entities should Presidio look for?
+  # Full list available in Microsoft Presidio documentation.
+  pii_entities:
+    - CREDIT_CARD
+    - EMAIL_ADDRESS
+    - PHONE_NUMBER
+    - US_SSN
+    - IP_ADDRESS
+    - PERSON
+  
+  # [TUNING]
+  # Confidence threshold (0.0 to 1.0).
+  # - Lower (e.g., 0.2) = More redaction, higher chance of false positives.
+  # - Higher (e.g., 0.8) = Less redaction, higher chance of leaking data.
+  score_threshold: 0.4
+
+# --- SANITIZATION POLICY ---
+# Only active if 'services.sanitizer' is true.
+sanitization:
+  # [XSS PROTECTION]
+  # HTML tags allowed in text fields. All other tags (e.g., <script>, <iframe>) are stripped.
+  allowed_tags:
+    - b
+    - i
+    - u
+    - strong
+    - em
+    - p
+    - br
+    
+  # HTML attributes allowed (e.g., <a href="...">).
+  # We securely block 'class', 'style', and 'onclick' by default to prevent injection.
+  allowed_attributes: {}
