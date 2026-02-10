@@ -174,13 +174,11 @@ class SentinelClient:
         """
         url = f"{self.base_url}/retrieve/file/{file_id}"
 
-        # FIX: stream=True is essential for large files
         with requests.get(url, headers=self._get_headers(), stream=True) as resp:
             self._handle_error(resp)
 
             if output_path:
                 with open(output_path, "wb") as f:
-                    # FIX: Iterate in 8KB chunks to keep RAM usage low
                     for chunk in resp.iter_content(chunk_size=8192):
                         f.write(chunk)
                 return None  # Standard practice: void return if side-effect (saving) occurred
