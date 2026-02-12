@@ -141,6 +141,21 @@ curl -X POST "http://localhost:8000/ingest/data" \
 ## Python Client SDK
 A dedicated SDK is available in `sdk/` to simplify integration.
 
+To use the Python client in your local scripts or notebooks, you must install the SDK package. We recommend installing it in **editable mode** (`-e`) so any changes you make to the SDK code are immediately reflected without reinstalling.
+
+1.  **Navigate to the SDK directory**:
+    ```bash
+    cd sdk
+    ```
+
+2.  **Install in Editable Mode**:
+    ```bash
+    pip install -e .
+    ```
+    *(Note: It is recommended to use a virtual environment: `python -m venv venv && source venv/bin/activate`)*
+
+### Usage:
+
 ```python
 from sentinel.client import SentinelClient
 
